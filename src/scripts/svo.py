@@ -26,9 +26,35 @@ class StereoVisualOdometry:
         self.path_msg.header.frame_id = "map"
         self.focal_length = 477.0
         self.baseline = 70 # 0.07 m
+        self.detector = 'sift'
 
+    # <----FEATURE EXTRACTOR---->
+    def extract_features(self, image, detector, mask=None):
+        if detector == 'sift':
+            create_detector = cv2.SIFT_create()
+        elif detector == 'orb':
+            create_detector = cv2.ORB_create()
+        keypoints, descriptors = create_detector.detectAndCompute(image, mask)
+        return keypoints, descriptors
+
+
+    # <----FEATURE MATCHER---->
+    def match_features(self, first_descriptor, second_descriptor, detector, k=2,  distance_threshold=1.0):
+        if detector == 'sift':
+            feature_matcher = cv2.BFMatcher_create(cv2.NORM_L2, crossCheck=False)
+        elif detector == 'orb':
+            feature_matcher = cv2.BFMatcher_create(cv2.NORM_L2, crossCheck=False)
+        matches = feature_matcher.knnMatch(first_descriptor, second_descriptor, k=k)
+
+        # Filtering out the weak features
+        filtered_matches = []
+        for match1, match2 in matches:
+            if match1.distance <= distance_threshold * match2.distance:
+                filtered_matches.append(match1)
+        return filtered_matches
+    
     def detect_features(self, img):
-        
+
         pass
 
     def track_features(self, prev_img, curr_img, prev_pts):
@@ -42,6 +68,8 @@ class StereoVisualOdometry:
         left_gray = cv2.cvtColor(left_img, cv2.COLOR_BGR2GRAY)
         right_img = self.bridge.compressed_imgmsg_to_cv2(right_img_msg, "bgr8")
         right_gray = cv2.cvtColor(right_img, cv2.COLOR_BGR2GRAY)
+        # kpLA, dLA = self.extract_features(left_img, self.detector, mask=None)
+        print(cv2.__version__)
         return
     
     def odom_callback(self, odom):
