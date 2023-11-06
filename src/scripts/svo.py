@@ -7,6 +7,7 @@ from sensor_msgs.msg import Image, CompressedImage
 from cv_bridge import CvBridge
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import String
 import cv2
 
 class StereoVisualOdometry:
@@ -26,15 +27,8 @@ class StereoVisualOdometry:
         self.focal_length = 477.0
         self.baseline = 70 # 0.07 m
 
-    def left_img_callback(self, data):
-        left_img = self.bridge.imgmsg_to_cv2(data, "bgr8")
-        left_gray = cv2.cvtColor(left_img, cv2.COLOR_BGR2GRAY)
-
-    def right_img_callback(self, data):
-        right_img = self.bridge.imgmsg_to_cv2(data, "bgr8")
-        right_gray = cv2.cvtColor(right_img, cv2.COLOR_BGR2GRAY)
-
     def detect_features(self, img):
+        
         pass
 
     def track_features(self, prev_img, curr_img, prev_pts):
@@ -44,7 +38,10 @@ class StereoVisualOdometry:
         pass
 
     def callback(self, left_img_msg, right_img_msg):
-
+        left_img = self.bridge.compressed_imgmsg_to_cv2(left_img_msg, "bgr8")
+        left_gray = cv2.cvtColor(left_img, cv2.COLOR_BGR2GRAY)
+        right_img = self.bridge.compressed_imgmsg_to_cv2(right_img_msg, "bgr8")
+        right_gray = cv2.cvtColor(right_img, cv2.COLOR_BGR2GRAY)
         return
     
     def odom_callback(self, odom):
@@ -56,7 +53,7 @@ class StereoVisualOdometry:
         self.p_msg.header.frame_id = "map"
         self.odom_path_publisher.publish(self.p_msg)
         return
-
+    
     def run(self):
         rate = rospy.Rate(10)
         while not rospy.is_shutdown():
