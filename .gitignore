@@ -1,1 +1,4 @@
 src/dataset/
+build/
+src/scripts/lab4.py
+src/scripts/mono_vo.py

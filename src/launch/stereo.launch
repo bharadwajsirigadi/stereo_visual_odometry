@@ -1,0 +1,5 @@
+<launch>
+    <node name="stereo" pkg="stereo_visual_odometry" type="stereo.py" output="screen"/>
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(find stereo_visual_odometry)/src/rviz/stereo_config.rviz"/>
+</launch>
+    
