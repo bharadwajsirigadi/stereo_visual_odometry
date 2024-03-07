@@ -102,13 +102,6 @@ class StereoVO():
         prev_right_img = frame_0[1]
         pres_left_img = frame_1[0]
         pres_right_img = frame_1[1]
-
-
-
-
-        
-        # rospy.loginfo('got the images')
-        #       ------------------------
         detector = self.featureDetection()
         kp0 = detector.detect(prev_left_img)
 
@@ -120,35 +113,12 @@ class StereoVO():
         # print(prev_left_img.shape)
         points_3d = self.triangulate_points(self.l_p, points_1, disparity)
         _, rvec, tvec = cv2.solvePnP(points_3d, points_0, self.l_k, None)
-        # print(points_3d.shape)
-        # # Triangulate points
-        # points_3d_homogeneous = cv2.triangulatePoints(self.l_p, self.r_p, points_0.T, points_1.T).T
-
-        # # Convert homogeneous coordinates to Cartesian
-        # points_3d = points_3d_homogeneous[:, :3] / points_3d_homogeneous[:, 3:]
-
-        # # Ensure points_0 and points_3d have the same size
-        # min_size = min(points_3d.shape[0], points_0.shape[0])
-        # points_3d = points_3d[:min_size]
-        # points_0 = points_0[:min_size]
-
-        # # Use solvePnP to estimate the rotation and translation
-        # _, rvec, tvec = cv2.solvePnP(points_3d, points_0, self.l_k, None)
 
         # # Convert the rotation vector to a rotation matrix
         R, _ = cv2.Rodrigues(rvec)
         # print(R)
-
         # Convert the translation vector to a numpy array
         T = np.array(tvec).reshape(3)
-        # print(T)
-
-        # ---------------------------------------------
-        # Print the rotation and translation
-        # print("Rotation matrix:")
-        # print(R)
-        # print("Translation vector:")
-        # print(T)
 
         return R,T
 
