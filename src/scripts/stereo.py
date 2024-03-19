@@ -31,69 +31,35 @@ class StereoVO():
         self.r_fc = self.r_k[0, 0]
         self.l_pp = (self.l_k[0, 2], self.l_k[1, 2])
         self.r_pp = (self.r_k[0, 2], self.r_k[1, 2])
-        self.baseline = 70 # 0.07 meters
+        self.baseline = 54 # 0.07 meters
+
+        self.left_img_pub = rospy.Publisher('/car_1/left_img_rectified', Image, queue_size=10)
+        self.right_img_pub = rospy.Publisher('/car_1/right_img_rectified', Image, queue_size=10)
+
+        self.bridge = CvBridge()
+
         return
     
-    def featureDetection(self):
-        # Detect FAST Features
-        thresh = dict(threshold=25, nonmaxSuppression=True)
-        fast = cv2.FastFeatureDetector_create(**thresh)
-        return fast
+    def publish_images(self, left_img_rectified, right_img_rectified):
+        left_img_msg = self.bridge.cv2_to_imgmsg(left_img_rectified, encoding="bgr8")
+        right_img_msg = self.bridge.cv2_to_imgmsg(right_img_rectified, encoding="bgr8")
+
+        left_img_msg.header.stamp = rospy.Time.now()
+        right_img_msg.header.stamp = rospy.Time.now()
+
+        self.left_img_pub.publish(left_img_msg)
+        self.right_img_pub.publish(right_img_msg)
+        return
     
-    def featureTracking(self, image_1, image_2, points_1):
-        # Set Lucas-Kanade Params
-        lk_params = dict(winSize  = (21,21),
-                        maxLevel = 3,
-                        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
-
-        # Calculate Optical Flow
-        points_2, status, err = cv2.calcOpticalFlowPyrLK(image_1, image_2, points_1, None, **lk_params)
-        status = status.reshape(status.shape[0])
-        points_1 = points_1[status==1]
-        points_2 = points_2[status==1]
-
-        # Return Tracked Points
-        return points_1,points_2
-    
-    def compute_depth(self, left_img, right_img):
-        left_gray = cv2.cvtColor(left_img, cv2.COLOR_BGR2GRAY)
-        right_gray = cv2.cvtColor(right_img, cv2.COLOR_BGR2GRAY)
-        stereo = cv2.StereoBM_create(numDisparities=16, blockSize=15)
-        disparity = stereo.compute(left_gray, right_gray).astype(np.float32)
-        # disparity = disparity.reshape(left_img.shape)
-        # depth = self.l_fc * self.baseline / disparity
-        # depth_msg = self.bridge.cv2_to_imgmsg(depth, "32FC1")
-        return disparity
-    
-    # Function to extract rotation and translation from essential matrix
-    def extract_rotation_translation(self, E):
-        W = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
-        U, _, Vt = np.linalg.svd(E)
-        R = np.dot(np.dot(U, W), Vt)
-        t = U[:, 2].reshape((3, 1))
-        return R, t
-    
-
-    def triangulate_points(self, proj_matrix, points_left, disparity_map):
-        points_3d = []
-        for point in points_left:
-            x = int(point[0])
-            y = int(point[1])
-            if x >= 0 and x < disparity_map.shape[1] and y >= 0 and y < disparity_map.shape[0]:
-                disparity_val = disparity_map[y, x]
-
-                if disparity_val > 0:  # Ensure valid disparity value
-                    depth = proj_matrix[0, 0] / disparity_val
-                    point_3d = [(point[0] - proj_matrix[0, 2]) * depth / proj_matrix[0, 0],
-                                (point[1] - proj_matrix[1, 2]) * depth / proj_matrix[1, 1],
-                                depth]
-                    points_3d.append(point_3d)
-                else:
-                    points_3d.append([0, 0, 0])
-            else:
-                points_3d.append([0, 0, 0])
-        return np.array(points_3d)
-
+    def filter_imgs(self, left_img, right_img):
+        # Input: Left and right images
+        # Returns: Rectified left and right images
+        # stereo rectification
+        blur_left = cv2.bilateralFilter(left_img,9,75,75)
+        blur_right = cv2.bilateralFilter(right_img,9,75,75)
+        
+        self.publish_images(blur_left, blur_right)
+        return 
     
     def stereoVO(self, frame_0, frame_1 , MIN_NUM_FEAT):
         # Input: Two image frames of each (left and right)
@@ -102,25 +68,10 @@ class StereoVO():
         prev_right_img = frame_0[1]
         pres_left_img = frame_1[0]
         pres_right_img = frame_1[1]
-        detector = self.featureDetection()
-        kp0 = detector.detect(prev_left_img)
 
-        points_0 = np.array([ele.pt for ele in kp0],dtype='float32')
-        points_0, points_1 = self.featureTracking(prev_left_img, pres_left_img, points_0)
+        self.filter_imgs(prev_left_img, prev_right_img)
 
-        disparity = self.compute_depth(pres_left_img, pres_right_img)
-        # print(disparity.shape)
-        # print(prev_left_img.shape)
-        points_3d = self.triangulate_points(self.l_p, points_1, disparity)
-        _, rvec, tvec = cv2.solvePnP(points_3d, points_0, self.l_k, None)
-
-        # # Convert the rotation vector to a rotation matrix
-        R, _ = cv2.Rodrigues(rvec)
-        # print(R)
-        # Convert the translation vector to a numpy array
-        T = np.array(tvec).reshape(3)
-
-        return R,T
+        return
 
 
 class Stereo():
@@ -286,30 +237,12 @@ class Stereo():
         prev_frame = [self.prev_left_img, self.prev_right_img]
         pres_frame = [left_img, right_img]
         self.StereoVO = StereoVO(self.l_p, self.r_p)
-        R, T = self.StereoVO.stereoVO(prev_frame, pres_frame, 1500)
+        self.StereoVO.stereoVO(prev_frame, pres_frame, 1500)
 
-        # R, T = self.MonoVO.monoVO(self.prev_img, img)
-        # rospy.loginfo('got the computation')
-        # rospy.loginfo(R)
-
-
-        # --------------------------------
-        transformation_mtx = np.eye(4)
-        transformation_mtx[0:3, 0:3] = R
-        T = T.reshape(3, 1)
-        transformation_mtx[:3, -1] = T[:, 0]
-
-        delta = np.dot(self.car_rot, T) 
-        self.car_pos[0] += delta[0]
-        self.car_pos[1] += delta[1]
-        self.car_pos[2] += delta[2]
-        
-        self.car_rot = np.dot(self.car_rot, R)
-        self.publish_odometry(self.car_pos, self.car_rot)
 
         # previous images update
         self.prev_left_img = left_img
-        self.pres_left_img = right_img
+        self.prev_right_img = right_img
         return
     
     def run(self):
