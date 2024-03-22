@@ -31,12 +31,15 @@ class StereoVO():
         self.r_fc = self.r_k[0, 0]
         self.l_pp = (self.l_k[0, 2], self.l_k[1, 2])
         self.r_pp = (self.r_k[0, 2], self.r_k[1, 2])
-        self.baseline = 54 # 0.07 meters
+        self.baseline = 0.54 # 0.07 meters
 
         self.left_img_pub = rospy.Publisher('/car_1/left_img_rectified', Image, queue_size=10)
         self.right_img_pub = rospy.Publisher('/car_1/right_img_rectified', Image, queue_size=10)
 
         self.bridge = CvBridge()
+
+        self.R = None
+        self.T = None
 
         return
     
@@ -57,9 +60,174 @@ class StereoVO():
         # stereo rectification
         blur_left = cv2.bilateralFilter(left_img,9,75,75)
         blur_right = cv2.bilateralFilter(right_img,9,75,75)
+        return blur_left, blur_right
+    
+    def get_disparity(self, left_img, right_img):
+        # Input: Left and right images
+        # Returns: Disparity image
+        left_gray = cv2.cvtColor(left_img, cv2.COLOR_BGR2GRAY)
+        right_gray = cv2.cvtColor(right_img, cv2.COLOR_BGR2GRAY)
+        stereo = cv2.StereoBM_create(numDisparities=16, blockSize=15)
+        disparity = stereo.compute(left_gray, right_gray)
+        disparity = np.divide(disparity, 16.0)
+        return disparity
+    
+    def detect_features(self, img): 
+        # Input: Image
+        # Returns: Keypoints and descriptors
+        # sift = cv2.SIFT_create()
+        # kp, des = sift.detectAndCompute(img, None)
+        featureEngine = cv2.FastFeatureDetector_create()
+        TILE_H = 10
+        TILE_W = 20
+        H,W, _ = img.shape
+        kp = []
+        idx = 0
+        for y in range(0, H, TILE_H):
+            for x in range(0, W, TILE_W):
+                imPatch = img[y:y+TILE_H, x:x+TILE_W]
+                keypoints = featureEngine.detect(imPatch)
+                for pt in keypoints:
+                    pt.pt = (pt.pt[0] + x, pt.pt[1] + y)
+
+                if (len(keypoints) > 20):
+                    keypoints = sorted(keypoints, key=lambda x: -x.response)
+                    for kpt in keypoints[0:20]:
+                        kp.append(kpt)
+                else:
+                    for kpt in keypoints:
+                        kp.append(kpt)
+        # return kp, des
+        # keypoints_array = np.array([kp.pt for kp in kp], dtype=np.float32)
+        # print(keypoints_array.shape)
+        return kp
+    
+    def track_points(self, prev_img, pres_img, prev_kp):
+        # Input: Previous and present images, previous keypoints and descriptors
+
+        trackPoints1 = cv2.KeyPoint_convert(prev_kp)
+        trackPoints1 = np.expand_dims(trackPoints1, axis=1)
+        # trackPoints1 = prev_kp
+
+        lk_params = dict( winSize  = (15,15),
+                          maxLevel = 3,
+                          criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 0.03))
+
+        trackPoints2, st, err = cv2.calcOpticalFlowPyrLK(prev_img, pres_img, trackPoints1, None, flags=cv2.MOTION_AFFINE, **lk_params)
+        # ptTrackable = np.where(st == 1, 1,0).astype(bool)
+        ptTrackable = np.where(st == 1, True, False)
+        trackPoints1_KLT = trackPoints1[st == 1]
+        trackPoints2_KLT_t = trackPoints2[st == 1]
+        trackPoints2_KLT = np.around(trackPoints2_KLT_t)
+
+        # among tracked points take points within error measure
+        error = 3
+        errTrackablePoints = err[ptTrackable, ...]
+        errThresholdedPoints = np.where(errTrackablePoints < error, 1, 0).astype(bool)
+        trackPoints1_KLT = trackPoints1_KLT[errThresholdedPoints, ...]
+        trackPoints2_KLT = trackPoints2_KLT[errThresholdedPoints, ...]
+
+        return trackPoints1_KLT, trackPoints2_KLT
+    
+    def get_3d_points(self, points_1, disparity):
+        # Input: Tracked points and disparity image
+        # Returns: 3D points
+        # Generate 3D point cloud
+        points_2d = []
+        points_3d = []
+        for point in points_1:
+            x = int(point[0])
+            y = int(point[1])
+            if x >= 0 and x < disparity.shape[1] and y >= 0 and y < disparity.shape[0]:
+                disparity_val = disparity[y, x]
+
+                if disparity_val > 0:  # Ensure valid disparity value
+                    depth = self.l_fc / disparity_val
+                    point_3d = [(point[0] - self.l_fc) * depth / self.l_fc,
+                                (point[1] - self.l_fc) * depth / self.l_fc,
+                                depth]
+                    points_3d.append(point_3d)
+                    points_2d.append(point)
+                else:
+                    continue
+            else:
+                continue
+
+        points_3d = np.array(points_3d)
+        points_2d = np.array(points_2d)
+        H,W = disparity.shape
+
+        # check for validity of tracked point Coordinates
+        hPts = np.where(points_2d[:,1] >= H)
+        wPts = np.where(points_2d[:,0] >= W)
+        outTrackPts = hPts[0].tolist() + wPts[0].tolist()
+        outDeletePts = list(set(outTrackPts))
+
+        if len(outDeletePts) > 0:
+            points_2d = np.delete(points_2d, outDeletePts, axis=0)
+            points_3d = np.delete(points_3d, outDeletePts, axis=0)
+        else:
+            points_2d = points_2d
+            points_3d = points_3d
+        return points_3d, points_2d
+    
+    def get_displaced_points(self, trackPoints1_KLT_L, trackPoints2_KLT_L, ImT1_disparityA, ImT2_disparityA):
+        trackPoints1_KLT_R = np.copy(trackPoints1_KLT_L)
+        trackPoints2_KLT_R = np.copy(trackPoints2_KLT_L)
+        selectedPointMap = np.zeros(trackPoints1_KLT_L.shape[0])
+
+        disparityMinThres = 0.0
+        disparityMaxThres = 100.0
+
+        for i in range(trackPoints1_KLT_L.shape[0]):
+            x1, y1 = int(trackPoints1_KLT_L[i, 0]), int(trackPoints1_KLT_L[i, 1])
+            x2, y2 = int(trackPoints2_KLT_L[i, 0]), int(trackPoints2_KLT_L[i, 1])
+
+            if (x1 >= 0 and x1 < ImT1_disparityA.shape[1] and y1 >= 0 and y1 < ImT1_disparityA.shape[0] and
+                x2 >= 0 and x2 < ImT2_disparityA.shape[1] and y2 >= 0 and y2 < ImT2_disparityA.shape[0]):
+                T1Disparity = ImT1_disparityA[y1, x1]
+                T2Disparity = ImT2_disparityA[y2, x2]
+
+                if (T1Disparity > disparityMinThres and T1Disparity < disparityMaxThres
+                and T2Disparity > disparityMinThres and T2Disparity < disparityMaxThres):
+
+
+
+                    if (T1Disparity > 0 and T2Disparity > 0):
+                        trackPoints1_KLT_R[i, 0] = x1 - T1Disparity
+                        trackPoints2_KLT_R[i, 0] = x2 - T2Disparity
+                        selectedPointMap[i] = 1
+
+        selectedPointMap = selectedPointMap.astype(bool)
+        trackPoints1_KLT_L_2d = trackPoints1_KLT_L[selectedPointMap]
+        trackPoints1_KLT_R_2d = trackPoints1_KLT_R[selectedPointMap]
+        trackPoints2_KLT_L_2d = trackPoints2_KLT_L[selectedPointMap]
+        trackPoints2_KLT_R_2d = trackPoints2_KLT_R[selectedPointMap]
         
-        self.publish_images(blur_left, blur_right)
-        return 
+        return trackPoints1_KLT_L_2d, trackPoints1_KLT_R_2d, trackPoints2_KLT_L_2d, trackPoints2_KLT_R_2d
+    
+    def triangulate(self, points2D_L, points2D_R, Proj1, Proj2):
+        numPoints = points2D_L.shape[0]
+        d3dPoints = np.ones((numPoints,3))
+
+        for i in range(numPoints):
+            pLeft = points2D_L[i,:]
+            pRight = points2D_R[i,:]
+
+            X = np.zeros((4,4))
+            X[0,:] = pLeft[0] * Proj1[2,:] - Proj1[0,:]
+            X[1,:] = pLeft[1] * Proj1[2,:] - Proj1[1,:]
+            X[2,:] = pRight[0] * Proj2[2,:] - Proj2[0,:]
+            X[3,:] = pRight[1] * Proj2[2,:] - Proj2[1,:]
+
+            [u,s,v] = np.linalg.svd(X)
+            v = v.transpose()
+            vSmall = v[:,-1]
+            vSmall /= vSmall[-1]
+
+            d3dPoints[i, :] = vSmall[0:-1]
+
+        return d3dPoints
     
     def stereoVO(self, frame_0, frame_1 , MIN_NUM_FEAT):
         # Input: Two image frames of each (left and right)
@@ -68,12 +236,36 @@ class StereoVO():
         prev_right_img = frame_0[1]
         pres_left_img = frame_1[0]
         pres_right_img = frame_1[1]
+        # prev_left = prev_left_img
+        # prev_right = prev_right_img
+        # pres_left = pres_left_img
+        # pres_right = pres_right_img 
+        prev_left, prev_right = self.filter_imgs(prev_left_img, prev_right_img)
+        pres_left, pres_right = self.filter_imgs(pres_left_img, pres_right_img)
+        disparity_prev = self.get_disparity(prev_left, prev_right)
+        disparity_pres = self.get_disparity(pres_left, pres_right)
 
-        self.filter_imgs(prev_left_img, prev_right_img)
+        # kp_prev_l, des_prev_l = self.detect_features(prev_left)
+        kp_prev_l = self.detect_features(prev_left)
+        points_1, points_2 = self.track_points(prev_left, pres_left, kp_prev_l)
 
-        return
 
+        points_2D_prev_l, points_2D_prev_r, points_2D_pres_l, points_2D_pres_r = self.get_displaced_points(points_1, points_2, disparity_prev, disparity_pres)
+        points_3D_prev = self.triangulate(points_2D_prev_l, points_2D_prev_r, self.l_p, self.r_p)
+        points_3D_pres = self.triangulate(points_2D_pres_l, points_2D_pres_r, self.l_p, self.r_p)
+        print('points_3D Shapes', points_3D_prev.shape, points_3D_pres.shape)
+        print('points_2D Shapes', points_2D_prev_l.shape, points_2D_prev_r.shape)
 
+        if points_3D_prev.shape[0] < 7:
+            return None, None
+        _, rvec, tvec, inliers = cv2.solvePnPRansac(points_3D_prev, points_2D_pres_l, self.l_k, None)
+        # # Convert the rotation vector to a rotation matrix
+        R, _ = cv2.Rodrigues(rvec)
+        # # Convert the translation vector to a numpy array
+        T = np.array(tvec).reshape(3)
+
+        return R, T
+     
 class Stereo():
     def __init__(self):
         rospy.init_node('stereo', anonymous=True)
@@ -118,6 +310,7 @@ class Stereo():
         self.prev_img_update = False
         self.odom_updated = False
         self.cam_info_updated = False
+
         return
     
     def odom_update(self, data):
@@ -237,8 +430,26 @@ class Stereo():
         prev_frame = [self.prev_left_img, self.prev_right_img]
         pres_frame = [left_img, right_img]
         self.StereoVO = StereoVO(self.l_p, self.r_p)
-        self.StereoVO.stereoVO(prev_frame, pres_frame, 1500)
+        
+        R, T = self.StereoVO.stereoVO(prev_frame, pres_frame, 1500)
+        if R is None and T is None:
+            self.prev_left_img = left_img
+            self.prev_right_img = right_img
+            return
+        # self.StereoVO.stereoVO(prev_frame, pres_frame, 1500)
+        # --------------------------------
+        transformation_mtx = np.eye(4)
+        transformation_mtx[0:3, 0:3] = R
+        T = T.reshape(3, 1)
+        transformation_mtx[:3, -1] = T[:, 0]
 
+        delta = np.dot(self.car_rot, T) 
+        self.car_pos[0] += delta[0]
+        self.car_pos[1] += delta[1]
+        self.car_pos[2] += delta[2]
+        
+        self.car_rot = np.dot(self.car_rot, R)
+        self.publish_odometry(self.car_pos, self.car_rot)
 
         # previous images update
         self.prev_left_img = left_img
