@@ -46,6 +46,7 @@ class StereoVO():
 
         self.sift = cv2.SIFT_create()
         self.flann = cv2.FlannBasedMatcher()
+        self.orb = cv2.ORB_create()
 
         return
     
@@ -78,71 +79,28 @@ class StereoVO():
         disparity = np.divide(disparity, 16.0)
         return disparity
     
-    def detect_features(self, img): 
-        # Input: Image
-        # Returns: Keypoints and descriptors
-        # sift = cv2.SIFT_create()
-        # kp, des = sift.detectAndCompute(img, None)
-        tile_h = 10
-        tile_w = 20
-        featureEngine = cv2.FastFeatureDetector_create()
-        def get_kps(x, y):
-            # Get the image tile
-            impatch = img[y:y + tile_h, x:x + tile_w]
+    def match_points(self, kp_prev, kp_pres, des_prev, des_pres):
+        # Input: Descriptors of previous and present frames
+        # Returns: Matched keypoints
+        
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
-            # Detect keypoints
-            keypoints = featureEngine.detect(impatch)
+        # Match descriptors of the two frames
+        matches = bf.match(des_prev, des_pres)
 
-            # Correct the coordinate for the point
-            for pt in keypoints:
-                pt.pt = (pt.pt[0] + x, pt.pt[1] + y)
+        # finding the humming distance of the matches and sorting them
+        matches = sorted(matches,key=lambda x:x.distance)
 
-            # Get the 10 best keypoints
-            if len(keypoints) > 10:
-                keypoints = sorted(keypoints, key=lambda x: -x.response)
-                return keypoints[:10] 
-            return keypoints
-        # Get the image height and width
-        h, w, *_ = img.shape
+        # Separate matched keypoints w.r.t. each frame
+        prev = [kp_prev[match.queryIdx] for match in matches]
+        pres = [kp_pres[match.trainIdx] for match in matches]
 
-        # Get the keypoints for each of the tiles
-        kp_list = [get_kps(x, y) for y in range(0, h, tile_h) for x in range(0, w, tile_w)]
+        trackPoints1 = cv2.KeyPoint_convert(prev).reshape(-1, 2)
+        
+        trackPoints2 = cv2.KeyPoint_convert(pres).reshape(-1, 2)
+        points_1, points_2 = trackPoints1, trackPoints2
 
-        # Flatten the keypoint list
-        kp_list_flatten = np.concatenate(kp_list)
-        return kp_list_flatten
-    
-    def track_points(self, prev_img, pres_img, prev_kp):
-        # Input: Previous and present images, previous keypoints and descriptors
-
-        trackPoints1 = cv2.KeyPoint_convert(prev_kp)
-        trackPoints1 = np.expand_dims(trackPoints1, axis=1)
-        # trackPoints1 = prev_kp
-
-        lk_params = dict( winSize  = (10,10),
-                          maxLevel = 3,
-                          criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 0.03))
-
-        trackPoints2, st, err = cv2.calcOpticalFlowPyrLK(prev_img, pres_img, trackPoints1, None, flags=cv2.MOTION_AFFINE, **lk_params)
-        print('trackpoints just after optical flow', len(trackPoints2))
-        max_error = 9
-        # Convert the status vector to boolean so we can use it as a mask
-        trackable = st.astype(bool)
-
-        # Create a maks there selects the keypoints there was trackable and under the max error
-        under_thresh = np.where(err[trackable] < max_error, True, False)
-
-        # Use the mask to select the keypoints
-        trackpoints1 = trackPoints1[trackable][under_thresh]
-        trackpoints2 = np.around(trackPoints2[trackable][under_thresh])
-
-        # Remove the keypoints there is outside the image
-        h, w = pres_img.shape
-        in_bounds = np.where(np.logical_and(trackpoints2[:, 1] < h, trackpoints2[:, 0] < w), True, False)
-        trackpoints1 = trackpoints1[in_bounds]
-        trackpoints2 = trackpoints2[in_bounds]
-
-        return trackpoints1, trackpoints2
+        return points_1, points_2
     
     def get_displaced_points(self, trackPoints1_KLT_L, trackPoints2_KLT_L, ImT1_disparityA, ImT2_disparityA):
         min_disp = 0.0
@@ -336,9 +294,6 @@ class StereoVO():
         t = out_pose[3:]
 
         return R, t
-        # # Make the transformation matrix
-        # transformation_matrix = self._form_transf(R, t)
-        # return transformation_matrix
     
     
     def stereoVO(self, frame_0, frame_1):
@@ -348,38 +303,15 @@ class StereoVO():
         prev_right = frame_0[1]
         pres_left = frame_1[0]
         pres_right = frame_1[1]
-        # prev_left = prev_left_img
-        # prev_right = prev_right_img
-        # pres_left = pres_left_img
-        # pres_right = pres_right_img 
         prev_left, prev_right = self.filter_imgs(prev_left, prev_right)
         pres_left, pres_right = self.filter_imgs(pres_left, pres_right)
         disparity_prev = self.get_disparity(prev_left, prev_right)
         disparity_pres = self.get_disparity(pres_left, pres_right)
 
-        # kp_prev_l, des_prev_l = self.detect_features(prev_left)
-        kp_prev_l, des_prev_l = self.sift.detectAndCompute(prev_left, None)
-        kp_pres_l, des_pres_l = self.sift.detectAndCompute(pres_left, None)
-        print('length of kp_prev_l', len(kp_prev_l))
-        matches = self.flann.knnMatch(des_pres_l, des_prev_l, k=2)
-    
-        good_matches = []
-        for m, n in matches:
-            if m.distance < 0.7 * n.distance:
-                good_matches.append(m)
-        print('length of good matches', len(good_matches))
-        # Extract matched keypoints
-        prev = np.float32([kp_prev_l[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        pres = np.float32([kp_pres_l[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        print('Previous and Present matches', pres.shape, prev.shape)
-
-        kp_prev_l = self.detect_features(prev_left)
-        # print('points_1 just aafter detecting features', len(kp_prev_l))
-        points_1, points_2 = self.track_points(prev_left, pres_left, kp_prev_l)
-        # print('points_1 after tracking features', len(points_1))
-        # print('points_2 after tracking features', len(points_2))
-        print(points_1.shape, points_2.shape)
-        
+        # Detect keypoints and descriptors in previous and present frames
+        keypoints_prev, descriptors_prev = self.orb.detectAndCompute(prev_left, None)
+        keypoints_present, descriptors_present = self.orb.detectAndCompute(pres_left, None)
+        points_1, points_2 = self.match_points(keypoints_prev, keypoints_present, descriptors_prev, descriptors_present)
         points_2D_prev_l, points_2D_prev_r, points_2D_pres_l, points_2D_pres_r = self.get_displaced_points(points_1, points_2, disparity_prev, disparity_pres)
         Q1, Q2, q1_l, q1_r, q2_l, q2_r = self.calc_3d(points_2D_prev_l, points_2D_prev_r, points_2D_pres_l, points_2D_pres_r)
 
