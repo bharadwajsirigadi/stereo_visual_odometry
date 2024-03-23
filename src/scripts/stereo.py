@@ -44,6 +44,9 @@ class StereoVO():
         self.R = None
         self.T = None
 
+        self.sift = cv2.SIFT_create()
+        self.flann = cv2.FlannBasedMatcher()
+
         return
     
     def publish_images(self, left_img_rectified, right_img_rectified):
@@ -355,11 +358,27 @@ class StereoVO():
         disparity_pres = self.get_disparity(pres_left, pres_right)
 
         # kp_prev_l, des_prev_l = self.detect_features(prev_left)
+        kp_prev_l, des_prev_l = self.sift.detectAndCompute(prev_left, None)
+        kp_pres_l, des_pres_l = self.sift.detectAndCompute(pres_left, None)
+        print('length of kp_prev_l', len(kp_prev_l))
+        matches = self.flann.knnMatch(des_pres_l, des_prev_l, k=2)
+    
+        good_matches = []
+        for m, n in matches:
+            if m.distance < 0.7 * n.distance:
+                good_matches.append(m)
+        print('length of good matches', len(good_matches))
+        # Extract matched keypoints
+        prev = np.float32([kp_prev_l[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        pres = np.float32([kp_pres_l[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        print('Previous and Present matches', pres.shape, prev.shape)
+
         kp_prev_l = self.detect_features(prev_left)
-        print('points_1 just aafter detecting features', len(kp_prev_l))
+        # print('points_1 just aafter detecting features', len(kp_prev_l))
         points_1, points_2 = self.track_points(prev_left, pres_left, kp_prev_l)
-        print('points_1 after tracking features', len(points_1))
-        print('points_2 after tracking features', len(points_2))
+        # print('points_1 after tracking features', len(points_1))
+        # print('points_2 after tracking features', len(points_2))
+        print(points_1.shape, points_2.shape)
         
         points_2D_prev_l, points_2D_prev_r, points_2D_pres_l, points_2D_pres_r = self.get_displaced_points(points_1, points_2, disparity_prev, disparity_pres)
         Q1, Q2, q1_l, q1_r, q2_l, q2_r = self.calc_3d(points_2D_prev_l, points_2D_prev_r, points_2D_pres_l, points_2D_pres_r)
