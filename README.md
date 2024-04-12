@@ -61,7 +61,7 @@ The SVO algorithm works in a series of steps:
 ---
 
 <div style="text-align:center;">
-    <img src="images/Stereo.png" alt="SVO Pipeline" width="600">
+    <img src="images/Stereo.png" alt="SVO Pipeline" width="1000">
     <p><strong>SVO pipeline</strong></p>
 </div>
 
